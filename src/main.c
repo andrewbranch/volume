@@ -33,13 +33,17 @@
 
 // IR stuff
 #define IR_MIN_PULSE_WIDTH 56 // the duration of a single bit in the sequence, in tens of us
-#define IR_N_SEQUENCES 2 // how many different IR codes to listen for
+#define IR_N_SEQUENCES 3 // how many different IR codes to listen for
 #define IR_N_WORDS 8
+#define IR_REPEAT_N_WORDS 2
 #define IR_MAX_PULSE_LEN 16 * IR_MIN_PULSE_WIDTH + 100 // longest pulse in bits (16) times length of a bit, plus a buffer
 #define IR_N_PULSES 33
 #define IR_DELAY_US 10
 #define IR_MAX_ERROR_PERCENT 10
 #define IR_ATTENUATION_STEP 4
+#define IR_REPEAT_N_PULSES 2
+#define IR_REPEAT_TIMEOUT_MS 100
+#define IR_REPEAT_SEQ_INDEX 0
 
 // Encoder stuff
 uint8_t downSeq[4] = { 0x01, 0x03, 0x00, 0x02 };
@@ -47,15 +51,17 @@ uint8_t upSeq[4] = { 0x02, 0x00, 0x03, 0x01 };
 uint8_t prevSeq[4] = { 0x03, 0x02, 0x01, 0x00 };
 volatile uint8_t up = 0;
 volatile uint8_t down = 0;
-volatile uint8_t *prevDirection = &down;
+volatile uint8_t *prevEncoderDirection = &down;
 volatile uint8_t attenuation = MAX_ATTENUATION;
 volatile uint8_t encoderState;
 
 // IR stuff
 uint16_t downIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8A28, 0x8A8A, 0x8A88, 0xA000 };
 uint16_t upIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8AA8, 0xA8A2, 0x2288, 0xA000 };
-int16_t *validSequences[IR_N_SEQUENCES] = { downIRCode, upIRCode };
+uint16_t repeatIRCode[IR_REPEAT_N_WORDS] = { 0xFFFF, 0x0800 };
+int16_t *validSequences[IR_N_SEQUENCES] = { repeatIRCode, downIRCode, upIRCode };
 volatile uint8_t incomingIR = 0;
+volatile uint8_t *prevIRdirection = &down;
 
 void setupInterrupts();
 void setAttenuation(uint8_t attenuation, uint8_t channelAddress);
@@ -71,7 +77,7 @@ ISR(PCINT0_vect) {
   if (!up) {
     down += ATTENUATION_INCREMENT * (downSeq[encoderState] == nextState);
     if (!down) {
-      *prevDirection += ATTENUATION_INCREMENT * (prevSeq[encoderState] == nextState);
+      *prevEncoderDirection += ATTENUATION_INCREMENT * (prevSeq[encoderState] == nextState);
     }
   }
   
@@ -90,11 +96,8 @@ int main(void) {
   // enable pull-up on pins 3 & 4
   SET_BIT(PORTB, ENC_INC);
   SET_BIT(PORTB, ENC_DEC);
-  // Enable SPI, Master
+  // Enable SPI in Master mode
   SPCR = BIT(SPE) | BIT(MSTR);
-  // set up interrupts after enough time to unplug USB,
-  // which messes up interrupts on these pins
-  _delay_ms(5000);
   setupInterrupts();
   // read initial encoder state
   encoderState = getEncoderState();
@@ -134,8 +137,11 @@ int main(void) {
     // Handle IR
     if (incomingIR) {
       incomingIR = 0;
-      CLEAR_BIT(PCMSK2, IR);
-      if (collectIRSequence(pulseLengths)) {
+      CLEAR_BIT(PCMSK2, IR); // Disable IR interrupts while we’re polling for IR changes
+      if (collectIRSequence(pulseLengths)) { // 
+        #if SERIAL_DEBUG
+          Serial.println("Collected potentially valid IR sequence");
+        #endif
         #if SERIAL_DEBUG && VERBOSE
           for (int i = 0; i < IR_N_PULSES * 2; i++) {
             Serial.print(pulseLengths[i]);
@@ -152,13 +158,17 @@ int main(void) {
           #endif
           if (validSequences[seqIndex] == downIRCode) {
             up += IR_ATTENUATION_STEP;
+            prevIRdirection = &up;
           } else if (validSequences[seqIndex] == upIRCode) {
             down += IR_ATTENUATION_STEP;
+            prevIRdirection = &down;
+          } else if (validSequences[seqIndex] == repeatIRCode) {
+            *prevIRdirection += IR_ATTENUATION_STEP;
           }
         }
       }
 
-      SET_BIT(PCMSK2, IR);
+      SET_BIT(PCMSK2, IR); // Reenable IR interrupts
     }
   }
 
@@ -237,7 +247,7 @@ uint8_t collectIRSequence(int16_t pulseLengths[IR_N_PULSES * 2]) {
           }
           Serial.println();
         #endif
-        return 0;
+        return pulseIndex + 1 == IR_REPEAT_N_PULSES * 2 - 1; // Return 1 only if the collected code might be the repeat code
       };
     }
     
@@ -300,6 +310,11 @@ int8_t matchIRSequence(int16_t pulseLengths[IR_N_PULSES * 2], uint16_t *validSeq
       }
 
       if (breakout) break;
+
+      // Early return path for repeat sequence since it’s fewer words
+      if (i == IR_REPEAT_SEQ_INDEX && word == IR_REPEAT_N_WORDS - 1) {
+        return i;
+      }
     }
 
     if (breakout) continue;
