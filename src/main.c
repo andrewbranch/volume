@@ -44,6 +44,16 @@
 #define IR_REPEAT_N_PULSES 2
 #define IR_REPEAT_TIMEOUT_MS 100
 #define IR_REPEAT_SEQ_INDEX 0
+// IR Macros allow sequences (individual button presses on a remote) to be
+// chained together to do other stuff, e.g. pressing up/down/up/down/hold
+// can be used to send the TV’s “power” IR code through the IR LED.
+#define IR_N_MACROS 1
+#define IR_MACRO_N_SEQS 5
+#define TIMER0_PRESCALE 1024
+#define TIMER0_TICKS 256
+#define TIMER0_OVF_MS 1000 / (F_CPU / TIMER0_PRESCALE / TIMER0_TICKS)
+#define IR_MACRO_TIMEOUT_MS 1000
+#define IR_MACRO_TIMEOUT_OVFS IR_MACRO_TIMEOUT_MS / (TIMER0_OVF_MS)
 
 // Encoder stuff
 uint8_t downSeq[4] = { 0x01, 0x03, 0x00, 0x02 };
@@ -60,15 +70,22 @@ uint16_t downIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8A28, 0x8A
 uint16_t upIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8AA8, 0xA8A2, 0x2288, 0xA000 };
 uint16_t repeatIRCode[IR_REPEAT_N_WORDS] = { 0xFFFF, 0x0800 };
 int16_t *validSequences[IR_N_SEQUENCES] = { repeatIRCode, downIRCode, upIRCode };
+int16_t *irMacroPower[IR_MACRO_N_SEQS] = { upIRCode, downIRCode, upIRCode, downIRCode, repeatIRCode };
+volatile int16_t *irMacro[IR_MACRO_N_SEQS] = {};
+volatile uint8_t macroIndex = 0;
+volatile uint8_t timerIndex = 0;
+
 volatile uint8_t incomingIR = 0;
 volatile uint8_t *prevIRdirection = &down;
 
 void setupInterrupts();
 void setAttenuation(uint8_t attenuation, uint8_t channelAddress);
 void writeSPI(uint8_t data);
+void startMacroTimer();
 uint8_t getEncoderState();
 uint8_t collectIRSequence(int16_t pulseLengths[IR_N_PULSES * 2]);
 int8_t matchIRSequence(int16_t pulseLengths[IR_N_PULSES * 2], uint16_t *validSequences[IR_N_SEQUENCES]);
+uint8_t arraysAreEqual(int16_t a[], int16_t b[], int16_t length);
 
 ISR(PCINT0_vect) {
   uint8_t nextState = getEncoderState();
@@ -86,6 +103,16 @@ ISR(PCINT0_vect) {
 
 ISR(PCINT2_vect) {
   incomingIR = 1;
+}
+
+ISR(TIMER0_OVF_vect) {
+  if (timerIndex++ >= IR_MACRO_TIMEOUT_OVFS) {
+    stopMacroTimer();
+    macroIndex = 0;
+    #if SERIAL_DEBUG
+      Serial.println("Timeout");
+    #endif
+  }
 }
 
 int main(void) {
@@ -139,10 +166,8 @@ int main(void) {
       incomingIR = 0;
       CLEAR_BIT(PCMSK2, IR); // Disable IR interrupts while we’re polling for IR changes
       if (collectIRSequence(pulseLengths)) { // 
-        #if SERIAL_DEBUG
-          Serial.println("Collected potentially valid IR sequence");
-        #endif
         #if SERIAL_DEBUG && VERBOSE
+          Serial.println("Collected potentially valid IR sequence");
           for (int i = 0; i < IR_N_PULSES * 2; i++) {
             Serial.print(pulseLengths[i]);
             if (i % 2 == 0) Serial.print("\t");
@@ -159,12 +184,29 @@ int main(void) {
           if (validSequences[seqIndex] == downIRCode) {
             up += IR_ATTENUATION_STEP;
             prevIRdirection = &up;
+            irMacro[macroIndex] = downIRCode;
           } else if (validSequences[seqIndex] == upIRCode) {
             down += IR_ATTENUATION_STEP;
             prevIRdirection = &down;
+            irMacro[macroIndex] = upIRCode;
           } else if (validSequences[seqIndex] == repeatIRCode) {
             *prevIRdirection += IR_ATTENUATION_STEP;
+            irMacro[macroIndex] = repeatIRCode;
           }
+
+          if (macroIndex == IR_MACRO_N_SEQS - 1) {
+            if (arraysAreEqual(*irMacro, *irMacroPower, IR_MACRO_N_SEQS)) {
+              #if SERIAL_DEBUG
+                Serial.println("Matched macro");
+              #endif
+            }
+          }
+          macroIndex = (macroIndex + 1) % IR_MACRO_N_SEQS;
+          startMacroTimer();
+          #if SERIAL_DEBUG
+            Serial.print("Macro sequence index is now ");
+            Serial.println(macroIndex);
+          #endif
         }
       }
 
@@ -196,6 +238,8 @@ inline void setupInterrupts() {
   SET_BIT(PCMSK0, ENC_DEC);
   // enable pin change interrupt on IR pin
   SET_BIT(PCMSK2, IR);
+  // enable timer interrupt on overflow
+  TIMSK0 = BIT(TOIE0);
   sei();
 }
 
@@ -322,4 +366,21 @@ int8_t matchIRSequence(int16_t pulseLengths[IR_N_PULSES * 2], uint16_t *validSeq
   }
 
   return -1;
+}
+
+uint8_t arraysAreEqual(int16_t a[], int16_t b[], int16_t length) {
+  for (int16_t i = 0; i < length; i++) {
+    if (a[i] != b[i]) return 0;
+  }
+  return 1;
+}
+
+void startMacroTimer() {
+  timerIndex = 0;
+  // start timer scaled by 1024
+  TCCR0B = BIT(CS02) | BIT(CS00);
+}
+
+void stopMacroTimer() {
+  TCCR0B = 0;
 }
