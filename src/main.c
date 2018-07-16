@@ -48,7 +48,8 @@
 // chained together to do other stuff, e.g. pressing up/down/up/down/hold
 // can be used to send the TV’s “power” IR code through the IR LED.
 #define IR_N_MACROS 1
-#define IR_MACRO_N_SEQS 5
+#define IR_MACRO_N_SEQS 4
+#define IR_MACRO_N_REPEATS 6
 #define TIMER0_PRESCALE 1024
 #define TIMER0_TICKS 256
 #define TIMER0_OVF_MS 1000 / (F_CPU / TIMER0_PRESCALE / TIMER0_TICKS)
@@ -70,8 +71,8 @@ uint16_t downIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8A28, 0x8A
 uint16_t upIRCode[IR_N_WORDS] = { 0xFFFF, 0x00A2, 0xAAA2, 0x8888, 0x8AA8, 0xA8A2, 0x2288, 0xA000 };
 uint16_t repeatIRCode[IR_REPEAT_N_WORDS] = { 0xFFFF, 0x0800 };
 int16_t *validSequences[IR_N_SEQUENCES] = { repeatIRCode, downIRCode, upIRCode };
-int16_t *irMacroPower[IR_MACRO_N_SEQS] = { upIRCode, downIRCode, upIRCode, downIRCode, repeatIRCode };
-volatile int16_t *irMacro[IR_MACRO_N_SEQS] = {};
+int16_t *irMacroPower[IR_MACRO_N_SEQS + IR_MACRO_N_REPEATS] = { upIRCode, downIRCode, upIRCode, downIRCode, repeatIRCode, repeatIRCode, repeatIRCode, repeatIRCode, repeatIRCode ,repeatIRCode };
+volatile int16_t *irMacro[IR_MACRO_N_SEQS + IR_MACRO_N_REPEATS] = {};
 volatile uint8_t macroIndex = 0;
 volatile uint8_t timerIndex = 0;
 
@@ -110,7 +111,7 @@ ISR(TIMER0_OVF_vect) {
     stopMacroTimer();
     macroIndex = 0;
     #if SERIAL_DEBUG
-      Serial.println("Timeout");
+      Serial.println("Macro timeout");
     #endif
   }
 }
@@ -137,6 +138,12 @@ int main(void) {
     while (!Serial) {
       ; // wait for serial port to connect. Needed for native USB port only
     }
+    Serial.print("Up IR code address: ");
+    Serial.println((int16_t)upIRCode);
+    Serial.print("Down IR code address: ");
+    Serial.println((int16_t)downIRCode);
+    Serial.print("Repeat IR code address: ");
+    Serial.println((int16_t)repeatIRCode);
   #endif
 
   while (1) {
@@ -147,7 +154,7 @@ int main(void) {
       setAttenuation(attenuation, LEFT_CHANNEL);
       setAttenuation(attenuation, RIGHT_CHANNEL);
       up = 0;
-      #if SERIAL_DEBUG
+      #if 0
         Serial.println("Volume down");
       #endif
     } else if (down) {
@@ -156,7 +163,7 @@ int main(void) {
       setAttenuation(attenuation, LEFT_CHANNEL);
       setAttenuation(attenuation, RIGHT_CHANNEL);
       down = 0;
-      #if SERIAL_DEBUG
+      #if 0
         Serial.println("Volume up");
       #endif
     }
@@ -177,33 +184,44 @@ int main(void) {
         #endif
         int8_t seqIndex = matchIRSequence(pulseLengths, validSequences);
         if (seqIndex > -1) {
-          #if SERIAL_DEBUG
+          #if 0
             Serial.print("Matched sequence ");
             Serial.println(seqIndex);
           #endif
           if (validSequences[seqIndex] == downIRCode) {
             up += IR_ATTENUATION_STEP;
             prevIRdirection = &up;
-            irMacro[macroIndex] = downIRCode;
+            irMacro[macroIndex++] = downIRCode;
+            startMacroTimer();
           } else if (validSequences[seqIndex] == upIRCode) {
             down += IR_ATTENUATION_STEP;
             prevIRdirection = &down;
-            irMacro[macroIndex] = upIRCode;
+            irMacro[macroIndex++] = upIRCode;
+            startMacroTimer();
           } else if (validSequences[seqIndex] == repeatIRCode) {
             *prevIRdirection += IR_ATTENUATION_STEP;
-            irMacro[macroIndex] = repeatIRCode;
+            // Ignore repeats in macros until other sequences have been filled
+            // (adds tolerance for holding down a button too long accidentally).
+            // But, don’t start macro timer in here, because you still have to
+            // press another button within the timeout.
+            if (macroIndex > IR_N_SEQUENCES) {
+              irMacro[macroIndex++] = repeatIRCode;
+            }
           }
 
-          if (macroIndex == IR_MACRO_N_SEQS - 1) {
-            if (arraysAreEqual(*irMacro, *irMacroPower, IR_MACRO_N_SEQS)) {
+          if (macroIndex == IR_MACRO_N_SEQS + IR_MACRO_N_REPEATS ) {
+            macroIndex = 0;
+            if (arraysAreEqual((int16_t*)irMacro, (int16_t*)irMacroPower, IR_MACRO_N_SEQS + IR_MACRO_N_REPEATS)) {
               #if SERIAL_DEBUG
                 Serial.println("Matched macro");
               #endif
             }
+            // Ensure we don’t immediately run the same macro while continuing
+            // to hold down the same button
+            irMacro[0] = 0;
           }
-          macroIndex = (macroIndex + 1) % IR_MACRO_N_SEQS;
-          startMacroTimer();
-          #if SERIAL_DEBUG
+          
+          #if SERIAL_DEBUG && VERBOSE
             Serial.print("Macro sequence index is now ");
             Serial.println(macroIndex);
           #endif
@@ -258,7 +276,7 @@ uint8_t collectIRSequence(int16_t pulseLengths[IR_N_PULSES * 2]) {
       timeLow++;
       // Time out after max pulse length
       if (timeLow >= IR_MAX_PULSE_LEN) {
-        #if SERIAL_DEBUG
+        #if SERIAL_DEBUG && VERBOSE
           Serial.print("Sequence timed out at ");
           Serial.print(timeLow);
           Serial.println(" low");
@@ -280,7 +298,7 @@ uint8_t collectIRSequence(int16_t pulseLengths[IR_N_PULSES * 2]) {
       timeHigh++;
       // Time out after max pulse length
       if (timeHigh >= IR_MAX_PULSE_LEN) {
-        #if SERIAL_DEBUG
+        #if SERIAL_DEBUG && VERBOSE
           Serial.print("Sequence timed out at ");
           Serial.print(timeHigh);
           Serial.println(" high");
