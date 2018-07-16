@@ -154,7 +154,7 @@ int main(void) {
       setAttenuation(attenuation, LEFT_CHANNEL);
       setAttenuation(attenuation, RIGHT_CHANNEL);
       up = 0;
-      #if 0
+      #if SERIAL_DEBUG
         Serial.println("Volume down");
       #endif
     } else if (down) {
@@ -163,7 +163,7 @@ int main(void) {
       setAttenuation(attenuation, LEFT_CHANNEL);
       setAttenuation(attenuation, RIGHT_CHANNEL);
       down = 0;
-      #if 0
+      #if SERIAL_DEBUG
         Serial.println("Volume up");
       #endif
     }
@@ -184,7 +184,7 @@ int main(void) {
         #endif
         int8_t seqIndex = matchIRSequence(pulseLengths, validSequences);
         if (seqIndex > -1) {
-          #if 0
+          #if SERIAL_DEBUG
             Serial.print("Matched sequence ");
             Serial.println(seqIndex);
           #endif
@@ -199,13 +199,16 @@ int main(void) {
             irMacro[macroIndex++] = upIRCode;
             startMacroTimer();
           } else if (validSequences[seqIndex] == repeatIRCode) {
-            *prevIRdirection += IR_ATTENUATION_STEP;
             // Ignore repeats in macros until other sequences have been filled
             // (adds tolerance for holding down a button too long accidentally).
             // But, don’t start macro timer in here, because you still have to
             // press another button within the timeout.
+            // Also, don’t mess with the volume while holding down a button to
+            // finish out a macro.
             if (macroIndex > IR_N_SEQUENCES) {
               irMacro[macroIndex++] = repeatIRCode;
+            } else {
+              *prevIRdirection += IR_ATTENUATION_STEP;
             }
           }
 
